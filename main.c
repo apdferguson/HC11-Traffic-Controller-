@@ -1,17 +1,4 @@
-       /*============================================-=
-       ; Behaviour: 
-       ;      Generates a square wave with a 40% duty cycle
-       ;      using polling   (see text page 366)
-       ;      C demonstration version (with magic numbers)
-       ;
-       ; Assumptions:
-       ;      none
-       ; Board:
-       ;      CME11-E9-EVBU
-       ; Author/Date:
-       ;      Peter Walsh Feb 2001
-       ;      revised Feb 2002
-       ;========================================== */
+ 
 
 
 #define porta *(volatile unsigned char *)(0x1000)
@@ -45,80 +32,146 @@
 #define clear 0x40
 #define jump 0x7e
 
-unsigned int highwayG = 0;
-unsigned char fRd = 0;
-unsigned char hCheck = 0;
+/* State */
+unsigned char car = CAROFF;
 unsigned char state = HG;
+unsigned char stoFlag = FALSE;
+unsigned char stoCount = 0;
+unsigned char ltoFlag = FALSE;
+unsigned char ltoCount = 0;
 
-void whereWePretendToDoOtherStuff(void){
-  while(1){}
+
+/* The signal handler just clears the flag and re-enables itself. */
+void catch_alarm (int sig) {
+   signal (sig, catch_alarm);
+   alarm(TICK);
+   if (new_minor_cycle) {
+      printf("ERROR missed deadline \n");
+      exit(0);
+   } else {
+      new_minor_cycle = 1;
+   }
 }
 
-void Amber(void){
-  if(state == HG){
-    state = HY;
-    *(void(**)())0x0dd = tractorComin();
-
-  }else if(state == FG){
-    state = FY;
-  }
+void getCar(void) {
+   int num = read(0, buf, 4);
+   if (num > 0) {
+      if (buf[0] == 'o') {
+         car = CARON;
+      } else if (buf[0] == 'f') {
+         car = CAROFF;
+      }
+   }
 }
 
-void tractorComin(void){ //need to add 3 second timed yellow light for all transitions in program
-  *(void(**)())0x00ef = tractorComin(); //change irq jump table
-  tflg1 = clear;
-  if(fRd == 0){ //check to see if a car is already on the road
-    toc2 = tcnt + threeSec;
-    fRd = 1;
-  }else if(fRd == 1){
-    toc2 = tcnt + sevSec;
-    fRd = 2;
-  }
-  whereWePretendToDoOtherStuff();
+void fsm(void) {
+
+   switch(state) {
+      case HG:
+         if (!((car == CARON) && ltoFlag)) {
+            state = HG;
+	 } else {
+            state = HY;
+	    stoCount = 0;
+	    ltoCount = 0;
+         }
+         break;
+      case HY:
+         if (!stoFlag) {
+            state = HY;
+	 } else {
+            state = FG;
+	    stoCount = 0;
+	    ltoCount = 0;
+         }
+         break;
+      case FG:
+         if (((car == CARON) || !stoFlag) && (!ltoFlag)) {
+            state = FG;
+	 } else {
+            state = FY;
+	    stoCount = 0;
+	    ltoCount = 0;
+         }
+         break;
+      case FY:
+         if (!stoFlag) {
+            state = FY;
+	 } else {
+            state = HG;
+	    stoCount = 0;
+	    ltoCount = 0;
+         }
+         break;
+   } 
 }
 
-void highwayLighToggle(void){
-  if(highwayG == 0){
-    highwayG = 1;
-  }else if(highwayG == 1){
-    highwayG = 0;
-  }
+void putLights(void) {
+
+   switch(state) {
+      case HG:
+         printf("Highway Green Farm Road Red \n");
+         break;
+      case HY:
+         printf("Highway Yellow Farm Road Red \n");
+         break;
+      case FG:
+         printf("Highway Red Farm Road Green \n");
+         break;
+      case FY:
+         printf("Highway Red Farm Road Yellow \n");
+         break;
+   } 
 }
 
-void highwayLightCheck(void){ //check to see if highway light has been green for 10 sec
-  tflg1 = clear;
-  if(highwayG == 0){
-    return;
-  }else if(highwayG == 1){
-    Amber();
-  }
+void shortTimer(void) {
+   if (stoCount < STOMAX) {
+      stoCount = stoCount +1;
+   }
+   if (stoCount == STOMAX) {
+      stoFlag = 1;
+   } else {
+      stoFlag = 0;
+   }
 }
 
-void setup(void){
-  state = HG;
-  highwayG = 0;
-   *(unsigned char *)0x00ee = jump; //set up irq jump table
-   *(void(**)())0x00ef = highwayLightCheck;
-
-   *(unsigned char *)0x00dc = jump; //set up toc2 jump table
-   *(void(**)())0x00dd = highwayLighToggle;
-   tflg1 = clear; //clear flag
-
-   toc2 = tenSec + tcnt;
-   tmsk1 |= oc2;
-
-   whereWePretendToDoOtherStuff();
-
+void longTimer(void) {
+   if (ltoCount < LTOMAX) {
+      ltoCount = ltoCount +1;
+   }
+   if (ltoCount == LTOMAX) {
+      ltoFlag = 1;
+   } else {
+      ltoFlag = 0;
+   }
 }
 
+int main (void) {
 
+  *(unsigned char *)0x00ee = jump; //irq jumptable
+  *(void(**)())0x00ef = &getCar;
 
-unsigned char _start(void) {
+   /* Set up non blocking read */
+   fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
 
-  __asm__("lds #_stack");
+   /* Establish a handler for SIGALRM signals. */
+   signal (SIGALRM, catch_alarm);
 
-   setup();
+   /* Set an alarm. */
+   alarm (TICK);
 
-
-   return 0;
+   printf("\nCSCI 261 Traffic Light Controller Simulation\n\n");
+   printf("type the character 'o' to indicate a car is on the sensor\n");
+   printf("type the character 'f' to indicate a car is NOT on the sensor\n\n");
+   while (1) {
+      getCar();
+      shortTimer();
+      longTimer();
+      fsm();
+      putLights();
+      new_minor_cycle = 0;
+      while (!new_minor_cycle);
+   }
+     
+   return(0);
 }
